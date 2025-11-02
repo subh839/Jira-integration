@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: context-switcher-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: OPENAI_API_KEY
+        value: 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
