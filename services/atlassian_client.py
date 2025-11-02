@@ -1,16 +1,13 @@
-import requests
-import asyncio
-import aiohttp
+import httpx
 import logging
 from typing import List, Dict, Optional, Any
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
 
 logger = logging.getLogger(__name__)
 
-
 class AtlassianClient:
     """
-    Client for interacting with Atlassian REST APIs
+    Client for interacting with Atlassian REST APIs using httpx
     """
     
     def __init__(self, token: str, cloud_id: str):
@@ -21,66 +18,32 @@ class AtlassianClient:
             'Accept': 'application/json'
         }
         self.timeout = 30
-        self.executor = ThreadPoolExecutor(max_workers=5)
     
-    async def _make_async_request(self, url: str, params: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
-        """Make async HTTP request"""
+    async def _make_request(self, url: str, params: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+        """
+        Make async HTTP request using httpx
+        """
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
                     url, 
                     headers=self.base_headers, 
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout)
-                ) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    elif response.status == 404:
-                        logger.warning(f"Resource not found: {url}")
-                        return None
-                    else:
-                        logger.error(f"API request failed. Status: {response.status}, URL: {url}")
-                        return None
-        except Exception as e:
-            logger.error(f"Async request failed for URL: {url}: {str(e)}")
-            return None
-    def _make_sync_request(self, url: str, params: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
-        """Make synchronous HTTP request (for compatibility)"""
-        try:
-            response = requests.get(
-                url, 
-                headers=self.base_headers, 
-                params=params,
-                timeout=self.timeout
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 404:
-                logger.warning(f"Resource not found: {url}")
-                return None
-            else:
-                logger.error(f"API request failed. Status: {response.status_code}, URL: {url}")
-                return None
+                    params=params
+                )
                 
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 404:
+                    logger.warning(f"Resource not found: {url}")
+                    return None
+                else:
+                    logger.error(f"API request failed. Status: {response.status_code}, URL: {url}")
+                    return None
+                    
         except Exception as e:
             logger.error(f"Request failed for URL: {url}: {str(e)}")
             return None
-        
-
-    async def _make_request(self, url: str, params: Optional[Dict] = None, async_op: bool = True) -> Optional[Dict[str, Any]]:
-        """Generic request method that can be async or sync"""
-        if async_op:
-            return await self._make_async_request(url, params)
-        else:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                self.executor, 
-                self._make_sync_request, 
-                url, 
-                params
-            )
-        
+    
     async def get_issue_context(self, issue_key: str) -> Dict[str, Any]:
         """
         Main method to gather all context data for a Jira issue
@@ -101,7 +64,8 @@ class AtlassianClient:
             self._get_linked_service_tickets(issue_key),
             return_exceptions=True
         )
-
+        
+        # Handle exceptions
         if isinstance(confluence_docs, Exception):
             logger.error(f"Confluence docs error: {confluence_docs}")
             confluence_docs = []
@@ -125,7 +89,6 @@ class AtlassianClient:
             'serviceTickets': service_tickets
         }
     
-
     async def _get_issue_data(self, issue_key: str) -> Optional[Dict[str, Any]]:
         """Get basic Jira issue data"""
         url = f"https://api.atlassian.com/ex/jira/{self.cloud_id}/rest/api/3/issue/{issue_key}"
@@ -172,8 +135,6 @@ class AtlassianClient:
         
         return unique_docs[:8]
     
-
-
     async def _get_bitbucket_commits(self, issue_key: str, project_key: str) -> List[Dict[str, Any]]:
         """Get Bitbucket commits that mention the issue key"""
         commits = []
@@ -195,8 +156,8 @@ class AtlassianClient:
             commits_params = {'limit': 50}
             
             commit_tasks.append(self._get_commits_for_repo(commits_url, commits_params, repo_name, repo_slug, issue_key))
-
-            repo_commits = await asyncio.gather(*commit_tasks, return_exceptions=True)
+        
+        repo_commits = await asyncio.gather(*commit_tasks, return_exceptions=True)
         
         for commit_list in repo_commits:
             if isinstance(commit_list, list):
@@ -204,7 +165,6 @@ class AtlassianClient:
         
         return commits[:15]
     
-
     async def _get_commits_for_repo(self, commits_url: str, params: Dict, repo_name: str, repo_slug: str, issue_key: str) -> List[Dict[str, Any]]:
         """Get commits for a specific repository"""
         commits_data = await self._make_request(commits_url, params)
@@ -253,10 +213,3 @@ class AtlassianClient:
                     })
         
         return service_tickets
-    
-    def __del__(self):
-        """Cleanup executor"""
-        if hasattr(self, 'executor'):
-            self.executor.shutdown(wait=False)
-
-            
