@@ -1,18 +1,15 @@
-from fastapi import Depends
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
+import os
+import logging
+from datetime import datetime
+import openai
+
+# Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
-
-from fastapi import FastAPI, HTTPException, Header, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-import os
-from datetime import datetime
-import logging
-
-from services.atlassian_client import AtlassianClient
-from services.ai_service import AIService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,23 +30,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize AI Service
-ai_service = AIService() if os.getenv('OPENAI_API_KEY') else None
+# Initialize OpenAI
+openai_api_key = os.getenv('OPENAI_API_KEY')
+if openai_api_key:
+    openai.api_key = openai_api_key
+    ai_enabled = True
+    logger.info("OpenAI API configured successfully")
+else:
+    ai_enabled = False
+    logger.warning("OpenAI API key not found. AI features disabled.")
 
 # Pydantic models
 class SummarizeRequest(BaseModel):
     content: str
     max_length: Optional[int] = 100
-
-class ContextResponse(BaseModel):
-    issue: Dict[str, Any]
-    confluenceDocs: List[Dict[str, Any]]
-    bitbucketCommits: List[Dict[str, Any]]
-    serviceTickets: List[Dict[str, Any]]
-    lastUpdated: str
-    aiEnabled: bool
-    aiSummary: Optional[str] = None
-    aiSuggestions: Optional[List[str]] = None
 
 class HealthResponse(BaseModel):
     status: str
@@ -57,61 +51,39 @@ class HealthResponse(BaseModel):
     ai_enabled: bool
     timestamp: str
 
-# Dependency for authentication
-async def verify_auth(
-    authorization: str = Header(..., description="Bearer token from Forge"),
-    x_cloud_id: str = Header(..., description="Atlassian Cloud ID")
-):
-    if not authorization or not x_cloud_id:
-        raise HTTPException(status_code=401, detail="Missing authentication headers")
+def summarize_with_ai(text: str, max_length: int = 100) -> str:
+    """Summarize text using OpenAI"""
+    if not ai_enabled:
+        return f"AI not configured. Would summarize: {text[:max_length]}..."
     
-    token = authorization.replace("Bearer ", "")
-    return {"token": token, "cloud_id": x_cloud_id}
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a concise text summarizer."},
+                {"role": "user", "content": f"Summarize this in under {max_length} characters: {text}"}
+            ],
+            max_tokens=50,
+            temperature=0.1
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"OpenAI summarization failed: {e}")
+        return f"AI service error: {str(e)}"
 
 @app.get("/")
 async def root():
     return {
         "message": "Context Switcher API",
         "status": "running",
-        "ai_enabled": ai_service.is_enabled() if ai_service else False,
+        "ai_enabled": ai_enabled,
         "timestamp": datetime.utcnow().isoformat()
     }
 
-@app.get("/api/context/{issue_key}")
-async def get_context(
-    issue_key: str,
-    auth: Dict[str, str] = Depends(verify_auth)
-):
-    try:
-        logger.info(f"Fetching context for issue: {issue_key}")
-        
-        client = AtlassianClient(auth["token"], auth["cloud_id"])
-        context_data = client.get_issue_context(issue_key)
-        
-        if 'error' in context_data:
-            raise HTTPException(status_code=404, detail=context_data['error'])
-        
-        if ai_service and ai_service.is_enabled():
-            context_data = ai_service.enhance_with_ai(context_data)
-        
-        context_data['lastUpdated'] = datetime.utcnow().isoformat()
-        context_data['aiEnabled'] = ai_service.is_enabled() if ai_service else False
-        
-        return context_data
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
 @app.post("/api/summarize")
 async def summarize_content(request: SummarizeRequest):
-    if not ai_service or not ai_service.is_enabled():
-        raise HTTPException(status_code=503, detail="AI service not configured")
-    
     try:
-        summary = ai_service.summarize_text(request.content, request.max_length)
+        summary = summarize_with_ai(request.content, request.max_length)
         return {"summary": summary}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Summarization failed: {str(e)}")
@@ -121,9 +93,56 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         service="context-switcher-api",
-        ai_enabled=ai_service.is_enabled() if ai_service else False,
+        ai_enabled=ai_enabled,
         timestamp=datetime.utcnow().isoformat()
     )
+
+@app.get("/api/context/{issue_key}")
+async def get_context(issue_key: str):
+    # Generate AI summary for the context
+    context_summary = ""
+    if ai_enabled:
+        try:
+            prompt = f"Provide a brief summary for Jira issue {issue_key} which is about software development context switching."
+            context_summary = summarize_with_ai(prompt, 150)
+        except Exception as e:
+            context_summary = f"AI summary unavailable: {str(e)}"
+    
+    return {
+        "issue": {
+            "key": issue_key,
+            "summary": "Sample issue for demonstration",
+            "project": "TEST",
+            "status": "In Progress",
+            "issueType": "Bug"
+        },
+        "confluenceDocs": [
+            {
+                "id": "doc-1",
+                "title": "Sample Confluence Document",
+                "type": "page",
+                "_links": {"webui": "/spaces/TEST/pages/doc-1"}
+            }
+        ],
+        "bitbucketCommits": [
+            {
+                "id": "commit-1",
+                "message": f"Fixed {issue_key}: Sample commit",
+                "author": "Developer",
+                "authorTimestamp": 1672531200000,
+                "repository": "sample-repo"
+            }
+        ],
+        "serviceTickets": [],
+        "lastUpdated": datetime.utcnow().isoformat(),
+        "aiEnabled": ai_enabled,
+        "aiSummary": context_summary if ai_enabled else "AI not configured",
+        "aiSuggestions": [
+            "Check related documentation",
+            "Review recent code changes",
+            "Verify service dependencies"
+        ] if ai_enabled else []
+    }
 
 if __name__ == "__main__":
     import uvicorn

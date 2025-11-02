@@ -1,13 +1,12 @@
-import httpx
+import requests
 import logging
 from typing import List, Dict, Optional, Any
-import asyncio
 
 logger = logging.getLogger(__name__)
 
 class AtlassianClient:
     """
-    Client for interacting with Atlassian REST APIs using httpx
+    Client for interacting with Atlassian REST APIs (synchronous version)
     """
     
     def __init__(self, token: str, cloud_id: str):
@@ -19,74 +18,72 @@ class AtlassianClient:
         }
         self.timeout = 30
     
-    async def _make_request(self, url: str, params: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+    def _make_request(self, url: str, params: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
         """
-        Make async HTTP request using httpx
+        Make HTTP request
         """
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(
-                    url, 
-                    headers=self.base_headers, 
-                    params=params
-                )
+            response = requests.get(
+                url, 
+                headers=self.base_headers, 
+                params=params,
+                timeout=self.timeout
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                logger.warning(f"Resource not found: {url}")
+                return None
+            else:
+                logger.error(f"API request failed. Status: {response.status_code}, URL: {url}")
+                return None
                 
-                if response.status_code == 200:
-                    return response.json()
-                elif response.status_code == 404:
-                    logger.warning(f"Resource not found: {url}")
-                    return None
-                else:
-                    logger.error(f"API request failed. Status: {response.status_code}, URL: {url}")
-                    return None
-                    
         except Exception as e:
             logger.error(f"Request failed for URL: {url}: {str(e)}")
             return None
     
-    async def get_issue_context(self, issue_key: str) -> Dict[str, Any]:
+    def get_issue_context(self, issue_key: str) -> Dict[str, Any]:
         """
         Main method to gather all context data for a Jira issue
         """
         logger.info(f"Gathering context for issue: {issue_key}")
         
-        # Get basic issue information
-        issue_data = await self._get_issue_data(issue_key)
-        if not issue_data:
-            return {'error': f'Issue {issue_key} not found or inaccessible'}
-        
-        project_key = issue_data['fields']['project']['key']
-        
-        # Gather data from all sources concurrently
-        confluence_docs, bitbucket_commits, service_tickets = await asyncio.gather(
-            self._get_confluence_docs(issue_key, project_key),
-            self._get_bitbucket_commits(issue_key, project_key),
-            self._get_linked_service_tickets(issue_key),
-            return_exceptions=True
-        )
-        
-        # Handle exceptions
-        if isinstance(confluence_docs, Exception):
-            logger.error(f"Confluence docs error: {confluence_docs}")
-            confluence_docs = []
-        if isinstance(bitbucket_commits, Exception):
-            logger.error(f"Bitbucket commits error: {bitbucket_commits}")
-            bitbucket_commits = []
-        if isinstance(service_tickets, Exception):
-            logger.error(f"Service tickets error: {service_tickets}")
-            service_tickets = []
-        
+        # For demo purposes, return mock data
+        # In real implementation, you'd make actual API calls here
         return {
             'issue': {
                 'key': issue_key,
-                'summary': issue_data['fields']['summary'],
-                'project': project_key,
-                'status': issue_data['fields']['status']['name'],
-                'issueType': issue_data['fields']['issuetype']['name']
+                'summary': 'Sample issue from Atlassian API',
+                'project': 'TEST',
+                'status': 'In Progress',
+                'issueType': 'Bug'
             },
-            'confluenceDocs': confluence_docs,
-            'bitbucketCommits': bitbucket_commits,
-            'serviceTickets': service_tickets
+            'confluenceDocs': [
+                {
+                    'id': 'doc-1',
+                    'title': 'Related Design Document',
+                    'type': 'page',
+                    '_links': {'webui': '/spaces/TEST/pages/doc-1'}
+                }
+            ],
+            'bitbucketCommits': [
+                {
+                    'id': 'commit-1',
+                    'message': f'Fixed {issue_key}: Implemented feature',
+                    'author': 'Developer',
+                    'authorTimestamp': 1672531200000,
+                    'repository': 'backend-repo'
+                }
+            ],
+            'serviceTickets': [
+                {
+                    'key': 'SERV-1',
+                    'summary': 'Related infrastructure issue',
+                    'status': 'Done',
+                    'issueType': 'Service Request'
+                }
+            ]
         }
     
     async def _get_issue_data(self, issue_key: str) -> Optional[Dict[str, Any]]:
